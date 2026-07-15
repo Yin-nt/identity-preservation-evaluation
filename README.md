@@ -1,9 +1,5 @@
 # Evaluating Identity Preservation in Face Restoration
 
-Code accompanying the paper *"Evaluating Identity Preservation in Face
-Restoration: A Comparative Study Between Video Generation and Super-Resolution
-Models"* (`paper.pdf`).
-
 The study benchmarks general-purpose video-generation models (Wan 2.1 / Wan 2.2)
 against dedicated face-restoration models (GFPGAN, OSDFace) for **identity
 preservation** under five degradation types at three severity levels, using
