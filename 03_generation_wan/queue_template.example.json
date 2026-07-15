@@ -1,0 +1,15 @@
+{
+    "prompt": "<your identity-preserving i2v prompt>",
+    "negative_prompt": "",
+    "resolution": "832x480",
+    "video_length": 18,
+    "seed": 0,
+    "num_inference_steps": 25,
+    "guidance_scale": 5,
+    "flow_shift": 7,
+    "sample_solver": "unipc",
+    "image_prompt_type": "S",
+    "image_start": "",
+    "model_type": "i2v",
+    "model_filename": "<path or URL to the Wan i2v model weights>"
+}

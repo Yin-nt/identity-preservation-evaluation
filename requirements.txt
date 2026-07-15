@@ -1,0 +1,21 @@
+# Core
+numpy
+pandas
+tqdm
+opencv-python
+Pillow
+scikit-image
+scikit-learn
+matplotlib
+seaborn
+
+# Face recognition backbones
+insightface
+onnxruntime-gpu   # or onnxruntime for CPU-only
+deepface
+tensorflow        # backend for DeepFace / FaceNet512
+
+# Image-quality metric
+lpips
+torch
+torchvision
