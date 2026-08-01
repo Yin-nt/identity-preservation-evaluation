@@ -1,9 +1,5 @@
 # Evaluating Identity Preservation in Face Restoration
 
-Code accompanying the paper *"Degradation-Dependent Robustness of Identity
-Verification from Blind Face Restoration and
-Image-to-Video Generation Pipelines"*.
-
 The study benchmarks general-purpose video-generation models (Wan 2.1 / Wan 2.2)
 against dedicated face-restoration models (GFPGAN, OSDFace) for **identity
 preservation** under five degradation types at three severity levels, using
