@@ -24,8 +24,8 @@ from PIL import Image
 # --- Configuration ---
 # Dataset root. Override with the IPE_DATA_ROOT environment variable.
 DATA_ROOT = os.environ.get("IPE_DATA_ROOT", "data")
-INPUT_CSV = os.path.join(DATA_ROOT, "csv/frontal/blurred10.csv")
-OUTPUT_ZIP_PREFIX = "gaussian10"
+INPUT_CSV = os.path.join(DATA_ROOT, "csv/frontal/gaussian_L1.csv")
+OUTPUT_ZIP_PREFIX = "gaussian_L1"
 CHUNK_SIZE = 250
 DEFAULT_TEMPLATE = "queue_template.json"
 

@@ -21,8 +21,11 @@ Group filtering examples:
     python extract_similarity_arcface.py --mode extract --groups motion_L2,motion_L3
     python extract_similarity_arcface.py --mode scores --input reports/insightface/side --recursive --groups motion
 
+Frame selection (reference-free): the first/last quarters of each video are
+dropped, then the single frame with the highest RetinaFace detection
+confidence (`det_score`) is kept as the representative frame. 
 Notes:
-- Uses the InsightFace FaceAnalysis buffalo_s pack.
+- Uses the InsightFace FaceAnalysis buffalo_l pack by default.
 - Embeddings are cast via np.asarray(..., dtype=np.float32).copy() to avoid an
   "invalid __array_struct__" error.
 - Bootstrap defaults to 1000 iterations.
@@ -107,7 +110,7 @@ def parse_args():
     parser.add_argument("--max-rows", type=int, default=0, help="Row limit per CSV. 0 = all.")
 
     # InsightFace
-    parser.add_argument("--model-name", default="buffalo_s", help="InsightFace model pack.")
+    parser.add_argument("--model-name", default="buffalo_l", help="InsightFace model pack.")
     parser.add_argument("--det-size", type=int, default=640, help="Detector input size, e.g. 640.")
     parser.add_argument(
         "--providers",
@@ -115,11 +118,10 @@ def parse_args():
         help="ONNXRuntime providers, e.g. CUDAExecutionProvider,CPUExecutionProvider or CPUExecutionProvider.",
     )
 
-    # Video sampling
+    # Video sampling (reference-free frame selection)
     parser.add_argument("--skip-start", type=float, default=0.25, help="Fraction of video to skip at the start.")
     parser.add_argument("--skip-end", type=float, default=0.25, help="Fraction of video to skip at the end.")
-    parser.add_argument("--frame-step", type=int, default=5, help="Frame stride when reading the video.")
-    parser.add_argument("--top-k", type=int, default=3, help="Average the top-k frames by similarity.")
+    parser.add_argument("--frame-step", type=int, default=1, help="Frame stride when reading the video.")
 
     # Path clean
     parser.add_argument(
@@ -264,7 +266,16 @@ def build_insightface_app(args):
     return app
 
 
-def get_embedding_robust(img, app, ref_emb=None):
+def det_score_of(face):
+    """RetinaFace detection confidence, falling back to bbox area if absent."""
+    score = getattr(face, "det_score", None)
+    if score is not None:
+        return float(score)
+    return float((face.bbox[2] - face.bbox[0]) * (face.bbox[3] - face.bbox[1]))
+
+
+def get_embedding_robust(img, app):
+    """Embedding of the highest-confidence detected face. Reference-free."""
     if img is None:
         return None
 
@@ -274,10 +285,7 @@ def get_embedding_robust(img, app, ref_emb=None):
         if faces is None or len(faces) == 0:
             return None
 
-        if ref_emb is not None:
-            face = max(faces, key=lambda f: cosine_similarity(f.embedding, ref_emb))
-        else:
-            face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+        face = max(faces, key=det_score_of)
 
         emb = np.asarray(face.embedding, dtype=np.float32).copy()
 
@@ -292,7 +300,14 @@ def get_embedding_robust(img, app, ref_emb=None):
         return None
 
 
-def get_best_embedding_from_video(video_path, app, ref_emb, args):
+def get_best_frame_embedding(video_path, app, args):
+    """Reference-free representative-frame selection.
+
+    Drops the first/last `skip_start`/`skip_end` fraction of the video, then
+    keeps the single frame whose best face has the highest RetinaFace
+    detection confidence. The reference embedding never enters this search;
+    it is only used afterwards by the caller to score the selected frame.
+    """
     if not os.path.exists(video_path):
         return None
 
@@ -306,7 +321,8 @@ def get_best_embedding_from_video(video_path, app, ref_emb, args):
     start_f = int(total_frames * args.skip_start)
     end_f = int(total_frames * (1 - args.skip_end))
 
-    candidates = []
+    best_score = -1.0
+    best_emb = None
 
     for i in range(start_f, end_f, args.frame_step):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
@@ -315,30 +331,27 @@ def get_best_embedding_from_video(video_path, app, ref_emb, args):
         if not ret:
             break
 
-        emb = get_embedding_robust(frame, app, ref_emb)
-        if emb is not None:
-            sim = cosine_similarity(emb, ref_emb)
-            candidates.append((sim, emb))
+        try:
+            faces = frame is not None and app.get(frame)
+        except Exception as e:
+            print(f"[InsightFace ERROR] {type(e).__name__}: {e}")
+            continue
+
+        if not faces:
+            continue
+
+        face = max(faces, key=det_score_of)
+        score = det_score_of(face)
+
+        if score > best_score:
+            emb = np.asarray(face.embedding, dtype=np.float32).copy()
+            norm = np.linalg.norm(emb)
+            if norm > 0:
+                best_score = score
+                best_emb = emb / norm
 
     cap.release()
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda x: x[0], reverse=True)
-
-    if len(candidates) >= args.top_k:
-        top_embs = [c[1] for c in candidates[: args.top_k]]
-    else:
-        top_embs = [candidates[0][1]]
-
-    avg_emb = np.mean(top_embs, axis=0)
-    norm = np.linalg.norm(avg_emb)
-
-    if norm == 0:
-        return None
-
-    return avg_emb / norm
+    return best_emb
 
 
 # ==============================================================================
@@ -667,9 +680,9 @@ def process_extract_csv(csv_path, app, args):
             skipped += 1
             continue
 
-        emb_base = get_embedding_robust(img_deg, app, emb_ref)
-        emb_wan = get_best_embedding_from_video(video_path, app, emb_ref, args)
-        emb_gt = get_embedding_robust(img_gt, app, emb_ref)
+        emb_base = get_embedding_robust(img_deg, app)
+        emb_wan = get_best_frame_embedding(video_path, app, args)
+        emb_gt = get_embedding_robust(img_gt, app)
 
         s_base = cosine_similarity(emb_base, emb_ref)
         s_wan = cosine_similarity(emb_wan, emb_ref)

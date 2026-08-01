@@ -13,7 +13,9 @@ outputs/
 results/
 results_*/
 reports/
-reports_*/
+reports_*/*
+!reports_legacy/README.md
+!reports_legacy/*.csv
 eer_batch_output/
 csv/
 *.zip

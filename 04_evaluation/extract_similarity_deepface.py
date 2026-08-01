@@ -7,10 +7,10 @@ the reference embedding for three conditions:
   * Baseline    : the degraded input image.
   * Wan2.1      : the best frame of the generated video (see frame selection below).
 
-Wan videos are scanned over their central portion (the first/last SKIP_*_PERCENT
-are dropped); the top-K frames most similar to the reference are averaged and
-L2-normalised to form the restored embedding. Results and a score-distribution
-plot are written to OUTPUT_DIR.
+Frame selection is reference-free: Wan videos are scanned over their central
+portion (the first/last SKIP_*_PERCENT are dropped) and the single frame whose
+best face has the highest RetinaFace detection confidence (`face_confidence`)
+is kept as the representative frame. Results and a score-distribution plot are written to OUTPUT_DIR.
 """
 
 import os
@@ -34,11 +34,10 @@ MODEL_NAME = "Facenet512"
 DETECTOR_BACKEND = "retinaface"
 RECOGNITION_THRESHOLD = 0.15
 
-# Video frame-selection config.
+# Video frame-selection config (reference-free: highest detection confidence).
 SKIP_START_PERCENT = 0.25
 SKIP_END_PERCENT = 0.25
-FRAME_STRIDE = 5
-TOP_K_AVERAGE = 3
+FRAME_STRIDE = 1  # 1 = check every frame in C
 SAVE_BEST_FRAMES = True
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -60,8 +59,12 @@ def cosine_similarity(emb1, emb2):
     return np.dot(v1, v2) / (norm1 * norm2)
 
 
-def get_embedding_robust(img, ref_emb=None):
-    """Return (embedding, FaceObj) for the best face in img, or (None, None)."""
+def get_embedding_robust(img):
+    """Return (embedding, FaceObj) for the highest-confidence face in img.
+
+    Reference-free: face selection uses only the detector's own confidence,
+    never a comparison against the reference identity.
+    """
     if img is None:
         return None, None
     try:
@@ -80,12 +83,8 @@ def get_embedding_robust(img, ref_emb=None):
         if not valid_faces:
             return None, None
 
-        if ref_emb is not None:
-            # Pick the face closest to the reference identity.
-            target = max(valid_faces, key=lambda x: cosine_similarity(x["embedding"], ref_emb))
-        else:
-            # Pick the largest face.
-            target = max(valid_faces, key=lambda x: x["facial_area"]["w"] * x["facial_area"]["h"])
+        # Pick the face with the highest detector confidence.
+        target = max(valid_faces, key=lambda x: x.get("face_confidence", 0))
 
         emb = np.array(target["embedding"])
         area = target["facial_area"]
@@ -95,8 +94,14 @@ def get_embedding_robust(img, ref_emb=None):
         return None, None
 
 
-def get_best_embedding_from_video(video_path, person_name, output_base, ref_emb):
-    """Scan a video, keep frames closest to ref_emb, return the fused embedding."""
+def get_best_frame_embedding(video_path, person_name, output_base):
+    """Reference-free representative-frame selection.
+
+    Drops the first/last SKIP_*_PERCENT of the video, then keeps the single
+    frame whose best face has the highest detector confidence. The reference
+    embedding never enters this search; it is only used afterwards by the
+    caller to score the selected frame.
+    """
     if not os.path.exists(video_path):
         print(f"Video not found: {video_path}")
         return None
@@ -106,36 +111,36 @@ def get_best_embedding_from_video(video_path, person_name, output_base, ref_emb)
     start_f = int(total_frames * SKIP_START_PERCENT)
     end_f = int(total_frames * (1 - SKIP_END_PERCENT))
 
-    candidates = []
+    best_conf = -1.0
+    best_emb = None
+    best_frame = None
+    best_idx = None
+
     for i in range(start_f, end_f, FRAME_STRIDE):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ret, frame = cap.read()
         if not ret:
             break
-        emb, face_obj = get_embedding_robust(frame, ref_emb)
-        if emb is not None:
-            sim = cosine_similarity(emb, ref_emb)
-            candidates.append((sim, emb, i, frame.copy(), face_obj))
+        emb, face_obj = get_embedding_robust(frame)
+        if emb is None:
+            continue
+        conf = face_obj.conf
+        if conf > best_conf:
+            best_conf = conf
+            best_emb = emb
+            best_frame = frame.copy()
+            best_idx = i
     cap.release()
 
-    if not candidates:
+    if best_emb is None:
         return None
-
-    candidates.sort(key=lambda x: x[0], reverse=True)
 
     if SAVE_BEST_FRAMES:
         save_dir = os.path.join(output_base, "best_frames_debug", person_name.replace(" ", "_"))
         os.makedirs(save_dir, exist_ok=True)
-        for rank, (_sim, _emb, f_idx, frame, _face) in enumerate(candidates[:1], 1):
-            cv2.imwrite(os.path.join(save_dir, f"top{rank}_frame_{f_idx}.jpg"), frame)
+        cv2.imwrite(os.path.join(save_dir, f"top1_frame_{best_idx}.jpg"), best_frame)
 
-    # Embedding fusion: average the top-K embeddings and L2-normalise.
-    if len(candidates) >= TOP_K_AVERAGE:
-        top_embs = [c[1] for c in candidates[:TOP_K_AVERAGE]]
-    else:
-        top_embs = [candidates[0][1]]
-    avg_emb = np.mean(top_embs, axis=0)
-    return avg_emb / np.linalg.norm(avg_emb)
+    return best_emb / np.linalg.norm(best_emb)
 
 
 def main():
@@ -157,13 +162,13 @@ def main():
         if emb_ref is None:
             continue
 
-        emb_gt, _ = get_embedding_robust(cv2.imread(test_p), emb_ref)
+        emb_gt, _ = get_embedding_robust(cv2.imread(test_p))
         s_gt = cosine_similarity(emb_gt, emb_ref)
 
-        emb_base, _ = get_embedding_robust(cv2.imread(source_p), emb_ref)
+        emb_base, _ = get_embedding_robust(cv2.imread(source_p))
         s_base = cosine_similarity(emb_base, emb_ref)
 
-        emb_wan = get_best_embedding_from_video(wan_p, person, OUTPUT_DIR, emb_ref)
+        emb_wan = get_best_frame_embedding(wan_p, person, OUTPUT_DIR)
         s_wan = cosine_similarity(emb_wan, emb_ref)
 
         print(f"[{idx + 1}/{len(df)}] {person[:10]:<10} | GT:{s_gt:.2f} Base:{s_base:.2f} Wan:{s_wan:.2f}")

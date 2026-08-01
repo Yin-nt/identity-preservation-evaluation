@@ -1,14 +1,22 @@
-"""Select frontal and side-pose identities from LFW.
+"""Select shared frontal/side identities from LFW.
 
-For every identity with at least two photos, estimates head pose with InsightFace
-and splits candidates into frontal vs side by yaw/pitch thresholds. It then builds
-two balanced groups:
+For every identity with at least four usable photos, estimates head pose with
+InsightFace and splits candidates into frontal vs side by yaw/pitch thresholds.
+An identity qualifies once it has at least one off-axis (side) candidate and
+at least three frontal candidates. Each qualifying identity then contributes
+four distinct photos, with each pose protocol having its own independent
+source + reference pair and no photo shared between the two protocols:
 
-  * side group    - one strongly off-axis test image + the sharpest frontal image
-                    of the same identity as the reference.
-  * frontal group - the two sharpest frontal images (test + reference).
+  * frontal source     - the sharpest frontal photo (degraded input under the
+                          frontal protocol).
+  * frontal reference   - the second-sharpest frontal photo (undegraded
+                          identity anchor for the frontal protocol only).
+  * side source         - the strongest off-axis photo (degraded input under
+                          the side-profile protocol).
+  * side reference       - the third-sharpest frontal photo (undegraded
+                          identity anchor for the side protocol only).
 
-Outputs one CSV per group (person, test_path, ref_path, ...) and copies the
+Outputs one CSV per protocol (person, test_path, ref_path, ...) and copies the
 selected Test/Ref images into OUTPUT_DIR.
 """
 
@@ -26,7 +34,7 @@ DATA_ROOT = os.environ.get("IPE_DATA_ROOT", "data")
 MODEL_NAME = "buffalo_l"
 LFW_PATH = os.path.join(DATA_ROOT, "input/lfw/lfw-deepfunneled")
 OUTPUT_DIR = os.path.join(DATA_ROOT, "Experiment_Data_Split")
-LIMIT_PER_GROUP = 250
+TARGET_IDENTITIES = 500
 
 # Pose thresholds (degrees).
 YAW_THRESHOLD = 25       # |yaw| above this -> side candidate
@@ -64,7 +72,7 @@ def main():
     frontal_group = []
 
     for person_name in tqdm(os.listdir(LFW_PATH), desc="Filtering identities"):
-        if len(side_group) >= LIMIT_PER_GROUP and len(frontal_group) >= LIMIT_PER_GROUP:
+        if len(side_group) >= TARGET_IDENTITIES:
             break
 
         person_dir = os.path.join(LFW_PATH, person_name)
@@ -72,7 +80,7 @@ def main():
             continue
 
         photos = os.listdir(person_dir)
-        if len(photos) < 2:
+        if len(photos) < 4:
             continue
 
         data_list = [
@@ -92,27 +100,29 @@ def main():
             if abs(d["yaw"]) < FRONTAL_THRESHOLD and abs(d["pitch"]) < FRONTAL_THRESHOLD
         ]
 
-        # Side group: strongest off-axis test image + sharpest frontal reference.
-        if len(side_group) < LIMIT_PER_GROUP and side_cands and front_cands:
-            best_side = max(side_cands, key=lambda x: max(abs(x["yaw"]), abs(x["pitch"])))
-            best_ref = max(front_cands, key=lambda x: x["sharpness"])
-            side_group.append({
-                "person": person_name,
-                "test_path": best_side["path"],
-                "ref_path": best_ref["path"],
-                "yaw": best_side["yaw"],
-            })
+        # Need a side photo plus three distinct frontal photos: frontal
+        # source, frontal reference, side reference (all different).
+        if not side_cands or len(front_cands) < 3:
             continue
 
-        # Frontal group: two sharpest frontal images (test + reference).
-        if len(frontal_group) < LIMIT_PER_GROUP and len(front_cands) >= 2:
-            sorted_front = sorted(front_cands, key=lambda x: x["sharpness"], reverse=True)
-            frontal_group.append({
-                "person": person_name,
-                "test_path": sorted_front[0]["path"],
-                "ref_path": sorted_front[1]["path"],
-                "sharpness": sorted_front[0]["sharpness"],
-            })
+        side_source = max(side_cands, key=lambda x: max(abs(x["yaw"]), abs(x["pitch"])))
+        sorted_front = sorted(front_cands, key=lambda x: x["sharpness"], reverse=True)
+        frontal_source = sorted_front[0]
+        frontal_reference = sorted_front[1]
+        side_reference = sorted_front[2]
+
+        side_group.append({
+            "person": person_name,
+            "test_path": side_source["path"],
+            "ref_path": side_reference["path"],
+            "yaw": side_source["yaw"],
+        })
+        frontal_group.append({
+            "person": person_name,
+            "test_path": frontal_source["path"],
+            "ref_path": frontal_reference["path"],
+            "sharpness": frontal_source["sharpness"],
+        })
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     df_side = pd.DataFrame(side_group)
@@ -128,7 +138,8 @@ def main():
             shutil.copy2(item["test_path"], os.path.join(base, "Test", f"{item['person']}_test.jpg"))
             shutil.copy2(item["ref_path"], os.path.join(base, "Ref", f"{item['person']}_ref.jpg"))
 
-    print(f"Done. Selected {len(df_side)} side and {len(df_front)} frontal identities.")
+    print(f"Done. Selected {len(df_side)} shared identities (side + frontal protocols, "
+          f"4 distinct photos each, no photo shared between protocols).")
 
 
 if __name__ == "__main__":

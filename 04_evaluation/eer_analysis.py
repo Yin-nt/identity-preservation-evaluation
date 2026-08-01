@@ -33,11 +33,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-# ---------------------------------------------------------------------------
-# Discovery / skip-empty logic shared with bootstrap_metrics.py so that both
-# scripts scan files consistently.
-# ---------------------------------------------------------------------------
-
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="CSV file or folder of CSVs.")
