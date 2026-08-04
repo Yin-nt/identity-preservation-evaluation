@@ -1,5 +1,6 @@
 
 import argparse
+import gc
 import glob
 import os
 from pathlib import Path
@@ -8,13 +9,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from deepface import DeepFace
 
@@ -22,7 +17,6 @@ from deepface import DeepFace
 DATA_ROOT = os.environ.get("IPE_DATA_ROOT", "data")
 POSE = os.environ.get("IPE_POSE", "frontal")
 
-METRIC_NAMES = ["MeanCos", "Accuracy", "Precision", "Recall", "F1", "AUC"]
 MODEL_COLUMNS = {"gfpgan_path": "GFPGAN", "OSDFace_path": "OSDFace"}
 
 
@@ -113,15 +107,6 @@ def cosine_similarity(emb1, emb2):
     return float(np.dot(v1, v2) / (n1 * n2))
 
 
-def safe_auc(y_true, scores):
-    try:
-        if len(np.unique(y_true)) < 2:
-            return np.nan
-        return float(roc_auc_score(y_true, scores))
-    except Exception:
-        return np.nan
-
-
 def compute_metrics(y_true, scores, threshold):
     scores = np.asarray(scores, dtype=np.float32)
     y_pred = (scores >= threshold).astype(int)
@@ -131,7 +116,6 @@ def compute_metrics(y_true, scores, threshold):
         "Precision": float(precision_score(y_true, y_pred, zero_division=0)),
         "Recall": float(recall_score(y_true, y_pred, zero_division=0)),
         "F1": float(f1_score(y_true, y_pred, zero_division=0)),
-        "AUC": safe_auc(y_true, scores),
     }
 
 
@@ -169,6 +153,8 @@ def get_all_embeddings_deepface(img_path, args):
     except Exception as e:
         print(f"[DeepFace ERROR] {img_path}: {type(e).__name__}: {e}")
         return []
+    finally:
+        gc.collect()
 
 
 def best_cosine_deepface(emb_list1, emb_list2):
@@ -191,36 +177,28 @@ def read_path(path):
 
 
 # ==============================================================================
-# 4. BOOTSTRAP
+# 4. BOOTSTRAP (F1 only, per pair — matches the reference notebook's
+# run_bootstrapping_face(): no AUC, no delta-vs-baseline)
 # ==============================================================================
-def bootstrap_metrics(df, pair_names, threshold, n_bootstrap, seed):
+def bootstrap_f1(df, pair_names, threshold, n_bootstrap, seed):
     rng = np.random.default_rng(seed)
     y_true = df["label"].astype(int).values
     n = len(df)
 
-    boot = {p: {m: [] for m in METRIC_NAMES} for p in pair_names}
-    deltas = {p: {f"Delta{m}": [] for m in METRIC_NAMES} for p in pair_names if p != "ref_vs_degra"}
+    results = {}
+    for p in pair_names:
+        scores = df[p].fillna(0).values
+        f1_obs = f1_score(y_true, (scores >= threshold).astype(int), zero_division=0)
 
-    for _ in tqdm(range(n_bootstrap), desc="Bootstrapping", leave=False):
-        idx = rng.integers(0, n, n)
-        y_s = y_true[idx]
-        cache = {}
+        f1_list = []
+        for _ in tqdm(range(n_bootstrap), desc=f"Bootstrapping {p}", leave=False):
+            idx = rng.integers(0, n, n)
+            f1_list.append(f1_score(y_true[idx], (scores[idx] >= threshold).astype(int), zero_division=0))
 
-        for p in pair_names:
-            met = compute_metrics(y_s, df[p].values[idx], threshold)
-            cache[p] = met
-            for m in METRIC_NAMES:
-                boot[p][m].append(met[m])
+        mean_bs, ci_low, ci_high = ci95(f1_list)
+        results[p] = {"F1_obs": f1_obs, "Mean_BS": mean_bs, "CI_low": ci_low, "CI_high": ci_high}
 
-        if "ref_vs_degra" in cache:
-            base = cache["ref_vs_degra"]
-            for p in pair_names:
-                if p == "ref_vs_degra":
-                    continue
-                for m in METRIC_NAMES:
-                    deltas[p][f"Delta{m}"].append(cache[p][m] - base[m])
-
-    return boot, deltas
+    return results
 
 
 def save_outputs(df, pair_names, exp_name, model_name, output_dir, args):
@@ -239,31 +217,15 @@ def save_outputs(df, pair_names, exp_name, model_name, output_dir, args):
     print("\n[BASIC METRICS]")
     print(df_summary.to_string(index=False))
 
-    boot, deltas = bootstrap_metrics(df, pair_names, args.threshold, args.n_bootstrap, args.seed)
+    bootstrap_results = bootstrap_f1(df, pair_names, args.threshold, args.n_bootstrap, args.seed)
 
     ci_rows = [
-        {"Experiment": exp_name, "Pair": p, "Metric": m, "Mean": mean, "CI95_Low": low, "CI95_High": high}
-        for p, metric_dict in boot.items()
-        for m, values in metric_dict.items()
-        for mean, low, high in [ci95(values)]
+        {"Experiment": exp_name, "Pair": p, **r}
+        for p, r in bootstrap_results.items()
     ]
     df_ci = pd.DataFrame(ci_rows)
     ci_path = output_dir / f"{exp_name}_bootstrap_ci.csv"
     df_ci.to_csv(ci_path, index=False)
-
-    delta_rows = []
-    for p, metric_dict in deltas.items():
-        for m, values in metric_dict.items():
-            mean, low, high = ci95(values)
-            delta_rows.append({
-                "Experiment": exp_name, "Comparison": f"{p} - ref_vs_degra", "Metric": m,
-                "MeanDelta": mean, "CI95_Low": low, "CI95_High": high,
-                "SignificantPositive": bool(low > 0) if not np.isnan(low) else False,
-                "SignificantNegative": bool(high < 0) if not np.isnan(high) else False,
-            })
-    df_delta = pd.DataFrame(delta_rows)
-    delta_path = output_dir / f"{exp_name}_bootstrap_delta_vs_baseline.csv"
-    df_delta.to_csv(delta_path, index=False)
 
     report_lines = [
         f"=== DEEPFACE I2I BOOTSTRAP REPORT: {exp_name.upper()} ({model_name}) ===",
@@ -276,23 +238,20 @@ def save_outputs(df, pair_names, exp_name, model_name, output_dir, args):
     for _, row in df_summary.iterrows():
         report_lines.append(
             f"- {row['Pair']}: MeanCos={row['MeanCos']:.4f}, Acc={row['Accuracy']:.4f}, "
-            f"Precision={row['Precision']:.4f}, Recall={row['Recall']:.4f}, F1={row['F1']:.4f}, AUC={row['AUC']:.4f}"
+            f"Precision={row['Precision']:.4f}, Recall={row['Recall']:.4f}, F1={row['F1']:.4f}"
         )
-    report_lines += ["", "2. Bootstrap 95% CI"]
+    report_lines += ["", "2. Bootstrap F1 (95% CI)"]
     for _, row in df_ci.iterrows():
-        report_lines.append(f"- {row['Pair']} {row['Metric']}: {row['Mean']:.4f} [{row['CI95_Low']:.4f}, {row['CI95_High']:.4f}]")
-    if not df_delta.empty:
-        report_lines += ["", "3. Delta vs ref_vs_degra (restoration effect)"]
-        for _, row in df_delta.iterrows():
-            note = " (positive)" if row["SignificantPositive"] else (" (negative)" if row["SignificantNegative"] else "")
-            report_lines.append(f"- {row['Comparison']} {row['Metric']}: {row['MeanDelta']:+.4f} [{row['CI95_Low']:.4f}, {row['CI95_High']:.4f}]{note}")
+        report_lines.append(
+            f"- {row['Pair']}: F1(obs)={row['F1_obs']:.4f}, Mean_BS={row['Mean_BS']:.4f}, "
+            f"CI=[{row['CI_low']:.4f}, {row['CI_high']:.4f}]"
+        )
 
     report_path = output_dir / f"{exp_name}_bootstrap_report.txt"
     report_path.write_text("\n".join(report_lines), encoding="utf-8")
 
     print(f"\nSaved summary : {summary_path}")
     print(f"Saved CI      : {ci_path}")
-    print(f"Saved delta   : {delta_path}")
     print(f"Saved report  : {report_path}")
 
 

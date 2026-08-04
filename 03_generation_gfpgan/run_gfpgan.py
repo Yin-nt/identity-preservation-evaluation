@@ -13,20 +13,14 @@ from tqdm import tqdm
 DATA_ROOT = os.environ.get("IPE_DATA_ROOT", "data")
 POSE = os.environ.get("IPE_POSE", "frontal")
 
-MODEL_URLS = {
-    "1.3": ("clean", "GFPGANv1.3", "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.3.pth"),
-    "1.4": ("clean", "GFPGANv1.4", "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth"),
-}
+MODEL_URL = "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth"
 
 
 def build_restorer(args):
-    if args.version not in MODEL_URLS:
-        raise ValueError(f"Unsupported version: {args.version}")
-    arch, _, model_path = MODEL_URLS[args.version]
     return GFPGANer(
-        model_path=model_path,
+        model_path=MODEL_URL,
         upscale=args.upscale,
-        arch=arch,
+        arch="clean",
         channel_multiplier=2,
         bg_upsampler=None,
     )
@@ -129,8 +123,7 @@ def parse_args():
     )
     parser.add_argument("--groups", default="", help="Filter experiments, e.g. motion or motion_L2,lowlight_L3.")
 
-    parser.add_argument("-v", "--version", default="1.4", choices=list(MODEL_URLS), help="GFPGAN model version.")
-    parser.add_argument("-s", "--upscale", type=int, default=2, help="Final upsampling scale.")
+    parser.add_argument("-s", "--upscale", type=int, default=4, help="Final upsampling scale.")
     parser.add_argument("-w", "--weight", type=float, default=0.5, help="Adjustable weight for v1.4.")
     parser.add_argument("--aligned", action="store_true", help="Input images are already cropped/aligned faces.")
     parser.add_argument("--only-center-face", dest="only_center_face", action="store_true")

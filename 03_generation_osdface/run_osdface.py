@@ -122,6 +122,7 @@ def merge_lora_weights(args):
         if "lora_A" in key:
             lora_b_key = key.replace("lora_A", "lora_B")
             unet_key = key.replace(".lora_A.weight", ".weight").replace("unet.", "")
+            assert lora_b_key in state_dict and unet_key in state_dict_unet, f"LoRA key mismatch for {key}"
             W_A, W_B = state_dict[key], state_dict[lora_b_key]
             original_weight = state_dict_unet[unet_key]
             processed_keys.update([key, lora_b_key])
@@ -129,6 +130,9 @@ def merge_lora_weights(args):
             if original_weight.dim() == 4 and W_A.dim() == 4 and W_B.dim() == 4:
                 out_channels, in_channels, kH, kW = original_weight.shape
                 rank = W_A.shape[0]
+                assert rank == args.lora_rank, f"LoRA rank mismatch: weights have {rank}, --lora-rank={args.lora_rank}"
+                assert W_A.shape == (rank, in_channels, kH, kW), f"W_A shape mismatch for {key}: {tuple(W_A.shape)}"
+                assert W_B.shape == (out_channels, rank, 1, 1), f"W_B shape mismatch for {key}: {tuple(W_B.shape)}"
                 delta_W = torch.matmul(W_B.view(out_channels, rank), W_A.view(rank, -1)).view(
                     out_channels, in_channels, kH, kW
                 )
