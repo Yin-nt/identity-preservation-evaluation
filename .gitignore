@@ -10,7 +10,8 @@ image/
 video/
 videos/
 outputs/
-results/
+results/*
+!results/main/
 results_*/
 reports/
 reports_*/*
